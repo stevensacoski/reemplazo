@@ -138,6 +138,18 @@
   .arrow{color:var(--muted);padding:0 4px}
   .rm{border:0;background:none;color:var(--danger);font-size:16px;line-height:1;padding:2px 6px;border-radius:5px}
   .rm:hover{background:#f5e7e6}
+  .btn.mini2{padding:4px 9px;font-size:12px}
+  /* registro status */
+  .st{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:999px;line-height:1.6}
+  .st-pending{background:#eef1ec;color:#5c6862}
+  .st-ok{background:var(--accent-tint);color:var(--accent-deep)}
+  .st-warn{background:#f6e3df;color:var(--danger)}
+  tr.active{background:#eef6f2 !important;box-shadow:inset 3px 0 0 var(--accent)}
+  .expandbtn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .assign-banner{padding:12px 16px;border-top:1px solid var(--line);background:#eef6f2;font-size:13.5px;
+        display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+  .assign-banner.muted{background:#fbfcfb;color:var(--muted)}
+  .assign-banner b{color:var(--accent-deep)}
   .regnote{width:100%;border:1px solid var(--line);border-radius:5px;padding:5px 7px;font-size:12.5px}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;
     padding:10px 18px;border-radius:8px;font-size:13.5px;opacity:0;pointer-events:none;transition:.2s;z-index:50}
@@ -203,13 +215,15 @@ let MUESTRA = DATA.muestra.slice();
 /* ================= STATE ================= */
 let mode = 'barrio';                 // 'barrio' | 'muni'
 let byId = new Map();                // id -> muestra record (rol/status)
-let registro = [];                   // decisions
+let listById = new Map();            // id -> listado provincial record
+let registro = [];                   // decisions (one row per original barrio)
 const state = {
   b_muni:'', b_barrio:'',            // barrio-flow selection
   m_muni:'',                         // municipio-flow selection
   sameType:true, hardFam:false, famTol:40,
   muniFilter:'any', sort:'reserva',
-  expanded:new Set()                 // expanded candidate municipios
+  expanded:new Set(),                // expanded candidate municipios
+  activeReg:null                     // origId of the barrio currently being assigned
 };
 
 /* ================= HELPERS ================= */
@@ -220,8 +234,9 @@ const fam = n => (n==null?'—':n.toLocaleString('es-AR'));
 const uniqSorted = arr => [...new Set(arr)].sort((a,b)=>a.localeCompare(b,'es'));
 
 function rebuildIndex(){
-  byId = new Map();
+  byId = new Map(); listById = new Map();
   MUESTRA.forEach(m=>byId.set(m.id, m));
+  LISTADO.forEach(b=>listById.set(b.id, b));
   $('#counts').textContent = MUESTRA.length + ' barrios en muestra · ' + LISTADO.length + ' en el listado provincial';
 }
 function statusOf(id){                // reserva | titular | out
@@ -353,15 +368,15 @@ function wireCrit(){
 
 /* ================= RENDER: candidate table ================= */
 function candTable(rows, ctx){
+  ctx = ctx||{};
   if(!rows.length){
-    const msg = (ctx&&ctx.emptyMsg) || 'Probá desactivar “mismo tipo”, ampliar la tolerancia de familias, o cambiar el municipio.';
+    const msg = ctx.emptyMsg || 'Probá desactivar “mismo tipo”, ampliar la tolerancia de familias, o cambiar el municipio.';
     return `<div class="empty"><b>No hay candidatos con estos criterios.</b>${msg}</div>`;
   }
   const body = rows.map(b=>{
     const near = b.d!=null && ctx.tf!=null && b.d <= ctx.tf*0.25 ? 'near':'far';
-    const dtxt = b.d==null?'—':(b.f>=ctx.tf?'+':'−')+fam(b.d);
-    const key = ctx.tag+'|'+b.id;
-    const done = registro.some(r=>r.repId===b.id && r.origId===ctx.origId);
+    const dtxt = (b.d==null||ctx.tf==null)?'—':(b.f>=ctx.tf?'+':'−')+fam(b.d);
+    const done = ctx.assignedRepId===b.id;
     return `<tr>
       <td>${badge(b.st)}</td>
       <td><b>${esc(b.b)}</b> <span class="id">#${b.id}</span></td>
@@ -373,16 +388,15 @@ function candTable(rows, ctx){
       <td><button class="pick ${done?'done':''}" data-rep="${b.id}">${done?'✓ elegido':'Elegir'}</button></td>
     </tr>`;
   }).join('');
-  const tbl = `<div class="tablewrap"><table>
+  return `<div class="tablewrap"><table>
     <thead><tr>
       <th>Estado</th><th>Barrio</th><th>Municipio</th><th>Localidad</th>
-      <th>Tipo</th><th class="num">Familias</th><th class="num">Δ vs objetivo</th><th></th>
+      <th>Tipo</th><th class="num">Familias</th><th class="num">${ctx.tf!=null?'Δ vs objetivo':''}</th><th></th>
     </tr></thead><tbody>${body}</tbody></table></div>`;
-  return tbl;
 }
-function wirePicks(scope, ctx){
+function wirePicks(scope, onPick){
   scope.querySelectorAll('.pick[data-rep]').forEach(btn=>{
-    btn.onclick=()=>{ addRegistro(ctx, +btn.dataset.rep); };
+    btn.onclick=()=>onPick(+btn.dataset.rep);
   });
 }
 
@@ -422,83 +436,132 @@ function renderBarrio(pane){
         <span class="hint">Se ocultan los barrios titulares (ya en campo). Regla dura: estrato${state.sameType?' + tipo':''}.</span></div>
       <div id="candbox"></div>
     </div>`;
-  const ctx = {tf:t.f, tag:'b', origId:t.id, orig:t, kind:'barrio'};
+  const existing = regByOrig(t.id);
+  const ctx = {tf:t.f, assignedRepId: existing? existing.repId : null};
   $('#candbox').innerHTML = candTable(rows, ctx);
-  wireCrit(); wirePicks($('#candbox'), ctx);
+  wireCrit();
+  wirePicks($('#candbox'), repId=>{
+    assignRep({id:t.id,b:t.b,dep:t.dep,loc:t.loc,e:t.e,t:t.t,f:t.f,rol:t.rol}, 'barrio', repId);
+    renderBarrio(pane); renderRegistro();
+  });
 }
 
 function renderMuni(pane){
   if(!state.m_muni){
     pane.innerHTML = `<div class="panel"><div class="empty">
       <b>Elegí el municipio que necesitás reemplazar</b>
-      Verás sus barrios muestreados y una lista de municipios del mismo estrato que pueden aportar reemplazos.</div></div>`;
+      Verás sus barrios muestreados y, al tocar “Reemplazar”, se cargan como pendientes en el registro para que le asignes a cada uno su reemplazo.</div></div>`;
     return;
   }
   const dep = state.m_muni;
   const estr = muniEstratos(dep);
+  const estrSet = new Set(estr);
   const barrios = MUESTRA.filter(m=>m.dep===dep)
     .sort((a,b)=>(a.rol===b.rol?0:a.rol==='titular'?-1:1)||a.b.localeCompare(b.b,'es'));
-  // need profile: titular barrios by tipo
   const needT = barrios.filter(b=>b.rol==='titular');
   const needAsent = needT.filter(b=>b.t==='Asentamiento').length;
   const needVilla = needT.filter(b=>b.t==='Villa').length;
 
-  // candidate municipios: other deptos sharing any estrato, with available (out-of-sample) barrios
-  const estrSet = new Set(estr);
+  // active target: only meaningful if it belongs to this municipio's seeded rows
+  let active = state.activeReg!=null ? regByOrig(state.activeReg) : null;
+  if(active && active.orig.dep!==dep) active=null;
+  const seededHere = registro.filter(r=>r.kind==='municipio' && r.orig.dep===dep);
+  const pendingHere = seededHere.filter(r=>r.repId==null).length;
+
+  // candidate municipios of the same estrato
   const perMuni = new Map();
   LISTADO.forEach(b=>{
-    if(b.dep===dep) return;
-    if(!estrSet.has(b.e)) return;
-    if(b.t!=='Villa' && b.t!=='Asentamiento') return;
+    if(b.dep===dep || !estrSet.has(b.e) || (b.t!=='Villa'&&b.t!=='Asentamiento')) return;
     if(!perMuni.has(b.dep)) perMuni.set(b.dep,{dep:b.dep, estr:new Set(), availA:0, availV:0, inMuestraT:0, inMuestraR:0});
     const o=perMuni.get(b.dep); o.estr.add(b.e);
     const st=statusOf(b.id);
-    if(st==='titular') o.inMuestraT++;
-    else if(st==='reserva') o.inMuestraR++;
+    if(st==='titular') o.inMuestraT++; else if(st==='reserva') o.inMuestraR++;
     else { if(b.t==='Asentamiento')o.availA++; else o.availV++; }
   });
   let cand=[...perMuni.values()];
-  // score: covers needed tipos & not already heavily sampled
   const covers = o => (needAsent? o.availA>0:true) && (needVilla? o.availV>0:true);
   cand.sort((a,b)=>{
     const ca=covers(a)?0:1, cb=covers(b)?0:1;
     if(ca!==cb) return ca-cb;
-    if(a.inMuestraT!==b.inMuestraT) return a.inMuestraT-b.inMuestraT; // prefer partidos aún no en campo
+    if(a.inMuestraT!==b.inMuestraT) return a.inMuestraT-b.inMuestraT;
     return (b.availA+b.availV)-(a.availA+a.availV);
   });
 
-  const barriosRows = barrios.map(b=>`<tr>
+  // rows of barrios to replace (with per-row assign button + current state)
+  const barriosRows = barrios.map(b=>{
+    const r = regByOrig(b.id);
+    const seeded = r && r.kind==='municipio';
+    const isActive = active && active.orig.id===b.id;
+    let stateCell;
+    if(!seeded) stateCell = '<span class="hint">sin cargar</span>';
+    else if(r.repId==null) stateCell = '<span class="st st-pending">pendiente</span>';
+    else { const st=rowStatus(r); stateCell = st==='ok'?'<span class="st st-ok">✓ '+esc(listById.get(r.repId).b)+'</span>':'<span class="st st-warn">⚠ distinto tipo</span>'; }
+    return `<tr class="${isActive?'active':''}">
       <td>${badge(statusOf(b.id))}</td>
       <td><b>${esc(b.b)}</b> <span class="id">#${b.id}</span></td>
       <td>${esc(b.loc)}</td><td>${esc(b.t)}</td><td class="num">${fam(b.f)}</td>
-      <td><button class="expandbtn" data-repl="${b.id}">Buscar reemplazo →</button></td>
-    </tr>`).join('');
+      <td>${stateCell}</td>
+      <td><button class="expandbtn ${isActive?'on':''}" data-assign="${b.id}">${isActive?'⟵ asignando':'Asignar reemplazo'}</button></td>
+    </tr>`;
+  }).join('');
+
+  const seededAll = seededHere.length===barrios.length && barrios.length>0;
+  const replaceBtn = `<button class="btn primary" id="seedmuni">${seededAll?'Barrios cargados ✓ · recargar':'Reemplazar los '+barrios.length+' barrios de '+esc(dep)}</button>`;
 
   pane.innerHTML =
    `<div class="panel target">
-      <div class="hd" style="color:var(--accent-deep)">Municipio a reemplazar: ${esc(dep)}</div>
+      <div class="hd" style="color:var(--accent-deep);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <span>Municipio a reemplazar: ${esc(dep)}</span>${replaceBtn}
+      </div>
       <div class="facts">
         <div class="fact"><div class="k">Estrato${estr.length>1?'s':''}</div><div class="v">${estr.map(esc).join(' + ')}</div></div>
         <div class="fact"><div class="k">Barrios en muestra</div><div class="v big">${barrios.length}</div></div>
         <div class="fact"><div class="k">Titulares por tipo</div><div class="v"><span class="chip a">${needAsent} asent.</span> <span class="chip v">${needVilla} villa</span></div></div>
         <div class="fact"><div class="k">Municipios del mismo estrato</div><div class="v big">${cand.length}</div></div>
       </div>
-      <div class="rescount" style="border-top:1px solid var(--line)"><span>Barrios de <b>${esc(dep)}</b> que habría que reemplazar</span></div>
+      <div class="rescount" style="border-top:1px solid var(--line)"><span>Barrios de <b>${esc(dep)}</b> que habría que reemplazar</span>
+        ${seededHere.length?`<span class="hint">${pendingHere} pendiente${pendingHere!==1?'s':''} de ${seededHere.length} cargado${seededHere.length!==1?'s':''}</span>`:'<span class="hint">Tocá “Reemplazar” para cargarlos al registro.</span>'}</div>
       <div class="tablewrap muni-barrios"><table>
-        <thead><tr><th>Estado</th><th>Barrio</th><th>Localidad</th><th>Tipo</th><th class="num">Familias</th><th></th></tr></thead>
+        <thead><tr><th>Estado</th><th>Barrio</th><th>Localidad</th><th>Tipo</th><th class="num">Familias</th><th>Reemplazo</th><th></th></tr></thead>
         <tbody>${barriosRows}</tbody></table></div>
     </div>
 
-    <div class="panel" style="margin-top:22px">
-      <div class="hd">Municipios del mismo estrato para reemplazar</div>
+    <div class="panel" style="margin-top:22px" id="optpanel">
+      <div class="hd">Opciones de reemplazo — municipios del mismo estrato</div>
+      ${active
+        ? `<div class="assign-banner">Asignando reemplazo para <b>${esc(active.orig.b)}</b> · ${esc(active.orig.t)} · ${fam(active.orig.f)} fam. · ${esc(active.orig.e)}
+             <span class="hint">Elegí un barrio de la lista de abajo (mismo estrato${state.sameType?' + tipo':''}).</span></div>`
+        : `<div class="assign-banner muted">Todavía no estás asignando ningún barrio. Tocá “Reemplazar” arriba, o “Asignar reemplazo” en un barrio, y después elegí acá su reemplazo.</div>`}
       ${critStrip(estr.join(' + '))}
       <div class="rescount"><span><b>${cand.length}</b> municipios candidatos</span>
-        <span class="hint">Ordenados: primero los que cubren los tipos necesarios y todavía no están en campo. <span class="chip a">a</span> = asentamientos / <span class="chip v">v</span> = villas disponibles (fuera de muestra).</span></div>
+        <span class="hint">Primero los que cubren los tipos necesarios y aún no están en campo. <span class="chip a">a</span> asentamientos / <span class="chip v">v</span> villas disponibles.</span></div>
       <div class="tablewrap"><table>
         <thead><tr><th>Municipio</th><th>Estrato</th><th class="num">Disp. asent.</th><th class="num">Disp. villa</th><th>Ya en muestra</th><th></th></tr></thead>
         <tbody id="munirows"></tbody></table></div>
     </div>`;
 
+  // per-barrio "Asignar reemplazo": seed if needed, set active, scroll to options
+  pane.querySelectorAll('.expandbtn[data-assign]').forEach(btn=>{
+    btn.onclick=()=>{
+      const id=+btn.dataset.assign;
+      const b=MUESTRA.find(m=>m.id===id);
+      seedOne(b);
+      state.activeReg=id;
+      renderMuni(pane); renderRegistro();
+      $('#optpanel').scrollIntoView({behavior:'smooth',block:'start'});
+    };
+  });
+  // "Reemplazar los N barrios": seed all, activate first pending
+  $('#seedmuni').onclick=()=>{
+    barrios.forEach(seedOne);
+    const firstPending = registro.find(r=>r.kind==='municipio' && r.orig.dep===dep && r.repId==null);
+    state.activeReg = firstPending ? firstPending.orig.id : (barrios[0] && barrios[0].id);
+    renderMuni(pane); renderRegistro();
+    $('#optpanel').scrollIntoView({behavior:'smooth',block:'start'});
+    toast('Cargué '+barrios.length+' barrios de '+dep+'. Elegí el reemplazo de cada uno.');
+  };
+
+  // candidate municipios
   const mr = $('#munirows');
   cand.forEach(o=>{
     const cov = covers(o);
@@ -512,88 +575,155 @@ function renderMuni(pane){
        <td><button class="expandbtn" data-muni="${esc(o.dep)}">${state.expanded.has(o.dep)?'Ocultar barrios':'Ver barrios ▾'}</button></td>`;
     mr.appendChild(tr);
     if(state.expanded.has(o.dep)){
-      const det = el('tr','detail');
-      const td = el('td'); td.colSpan=6;
-      const inner = el('div','inner');
-      // all available barrios of this municipio in the same estrato (titulars excluded), reserva first then tipo
-      let rows = LISTADO.filter(b=>b.dep===o.dep && estrSet.has(b.e) && (b.t==='Villa'||b.t==='Asentamiento'))
-        .map(b=>({...b, st:statusOf(b.id), d:null}))
-        .filter(b=>b.st!=='titular');
-      rows.sort((a,b)=>{const r=s=>s==='reserva'?0:1; return r(a.st)-r(b.st) || a.t.localeCompare(b.t,'es') || a.b.localeCompare(b.b,'es');});
-      const ctx={tf:null, tag:'m', origId:'muni:'+dep, orig:{b:'(municipio) '+dep, id:'—', dep:dep, loc:'', e:estr.join(' + '), t:'—', f:null}, kind:'municipio', replMuni:o.dep,
-        emptyMsg:'Este partido no tiene barrios disponibles fuera de la muestra en este estrato.'};
+      const det = el('tr','detail'); const td = el('td'); td.colSpan=6; const inner = el('div','inner');
+      // available barrios of this municipio; if a target is active, match its tipo/familias
+      let rows;
+      if(active){
+        rows = candidates(active.orig.e, active.orig.t, active.orig.f, active.orig.id, {onlyMuni:o.dep, sort:state.sort});
+      } else {
+        rows = LISTADO.filter(b=>b.dep===o.dep && estrSet.has(b.e) && (b.t==='Villa'||b.t==='Asentamiento'))
+          .map(b=>({...b, st:statusOf(b.id), d:null})).filter(b=>b.st!=='titular');
+        rows.sort((a,b)=>{const r=s=>s==='reserva'?0:1; return r(a.st)-r(b.st)||a.t.localeCompare(b.t,'es')||a.b.localeCompare(b.b,'es');});
+      }
+      const ctx={tf: active?active.orig.f:null, assignedRepId: active?active.repId:null,
+        emptyMsg: active?'Este partido no tiene barrios que coincidan con el barrio activo. Probá soltar “mismo tipo”.':'Este partido no tiene barrios disponibles fuera de la muestra en este estrato.'};
       inner.innerHTML = candTable(rows, ctx);
       td.appendChild(inner); det.appendChild(td); mr.appendChild(det);
-      wirePicks(inner, ctx);
+      wirePicks(inner, repId=>assignToActive(repId, pane));
     }
   });
   mr.querySelectorAll('.expandbtn[data-muni]').forEach(btn=>{
     btn.onclick=()=>{const d=btn.dataset.muni; state.expanded.has(d)?state.expanded.delete(d):state.expanded.add(d); renderMuni(pane);};
   });
-  // "buscar reemplazo" per target barrio → switch to barrio flow pre-filled
-  pane.querySelectorAll('.expandbtn[data-repl]').forEach(btn=>{
-    btn.onclick=()=>{
-      const b = MUESTRA.find(m=>m.id===+btn.dataset.repl);
-      mode='barrio'; setModeButtons();
-      state.b_muni=b.dep; state.b_barrio=String(b.id);
-      renderSelectors(); renderMain();
-      window.scrollTo({top:0,behavior:'smooth'});
-      toast('Buscando reemplazo para '+b.b);
-    };
-  });
   wireCrit();
 }
 
-/* ================= REGISTRO ================= */
-function addRegistro(ctx, repId){
-  const rep = LISTADO.find(b=>b.id===repId);
-  if(!rep) return;
-  // toggle off if same pick already there
-  const idx = registro.findIndex(r=>r.repId===repId && r.origId===ctx.origId);
-  if(idx>=0){ registro.splice(idx,1); renderMain(); renderRegistro(); toast('Reemplazo quitado'); return; }
-  registro.push({
-    kind:ctx.kind,
-    origId:ctx.origId,
-    origBarrio:ctx.orig.b, origMuni:ctx.orig.dep, origLoc:ctx.orig.loc,
-    origEstrato:ctx.orig.e, origTipo:ctx.orig.t, origFam:ctx.orig.f,
-    repId:rep.id, repBarrio:rep.b, repMuni:rep.dep, repLoc:rep.loc,
-    repTipo:rep.t, repFam:rep.f, repEstado:statusOf(rep.id),
-    nota:''
-  });
-  renderMain(); renderRegistro();
-  toast('Agregado al registro: '+rep.b);
+// assign a replacement to the currently active target, then advance to next pending
+function assignToActive(repId, pane){
+  if(state.activeReg==null){
+    const firstPending = registro.find(r=>r.kind==='municipio' && r.orig.dep===state.m_muni && r.repId==null);
+    if(firstPending) state.activeReg=firstPending.orig.id;
+    else { toast('Primero tocá “Reemplazar” o “Asignar reemplazo” en un barrio'); return; }
+  }
+  const r = regByOrig(state.activeReg); if(!r) return;
+  setRep(r, repId);
+  // advance to next pending barrio of the same municipio
+  const group = registro.filter(x=>x.kind==='municipio' && x.orig.dep===r.orig.dep);
+  const next = group.find(x=>x.repId==null);
+  state.activeReg = next ? next.orig.id : r.orig.id;
+  renderMuni(pane); renderRegistro();
+  if(next) toast('Asignado. Ahora: '+next.orig.b);
+  else toast('Listo: todos los barrios de '+r.orig.dep+' tienen reemplazo.');
 }
+
+
+/* ================= REGISTRO (siempre a nivel barrio) ================= */
+function regByOrig(origId){ return registro.find(r=>r.origId===origId); }
+
+// create a pending row for a muestra barrio (municipio flow), if it doesn't exist yet
+function seedOne(b){
+  if(regByOrig(b.id)) return;
+  registro.push({kind:'municipio', origId:b.id,
+    orig:{id:b.id,b:b.b,dep:b.dep,loc:b.loc,e:b.e,t:b.t,f:b.f,rol:b.rol},
+    repId:null, nota:''});
+}
+// set (or toggle off) the replacement on an existing row
+function setRep(row, repId){
+  row.repId = (row.repId===repId) ? null : repId;
+}
+// upsert a row for a target barrio and set its replacement (barrio flow)
+function assignRep(origRec, kind, repId){
+  let r = regByOrig(origRec.id);
+  if(!r){ r={kind, origId:origRec.id, orig:{...origRec}, repId:null, nota:''}; registro.push(r); }
+  setRep(r, repId);
+  if(r.repId==null && r.kind==='barrio'){ // dropped a barrio-flow pick with nothing else → remove empty row
+    const i=registro.indexOf(r); if(i>=0) registro.splice(i,1);
+  }
+}
+// pending | ok | warn
+function rowStatus(r){
+  if(r.repId==null) return 'pending';
+  const rep=listById.get(r.repId); if(!rep) return 'warn';
+  return (rep.e===r.orig.e && rep.t===r.orig.t) ? 'ok' : 'warn';
+}
+function setActiveAndGo(origId){
+  const r=regByOrig(origId); if(!r) return;
+  state.activeReg=origId;
+  if(r.kind==='municipio'){
+    mode='muni'; setModeButtons(); state.m_muni=r.orig.dep;
+    renderSelectors(); renderMain();
+    const op=$('#optpanel'); if(op) op.scrollIntoView({behavior:'smooth',block:'start'});
+  } else {
+    mode='barrio'; setModeButtons(); state.b_muni=r.orig.dep; state.b_barrio=String(origId);
+    renderSelectors(); renderMain(); window.scrollTo({top:0,behavior:'smooth'});
+  }
+  renderRegistro();
+}
+
 function renderRegistro(){
-  $('#regcount').textContent = registro.length;
+  const done = registro.filter(r=>r.repId!=null).length;
+  const pend = registro.length-done;
+  $('#regcount').textContent = registro.length + (registro.length?` · ${pend} pend.`:'');
   $('#csvbtn').disabled = registro.length===0;
   $('#clearreg').disabled = registro.length===0;
   const body=$('#regbody');
-  if(!registro.length){ body.innerHTML='<div class="empty">Todavía no elegiste ningún reemplazo. Usá el botón <b style="color:var(--accent-deep)">Elegir</b> en la lista de candidatos.</div>'; return; }
-  const rows=registro.map((r,i)=>`<tr>
-     <td><span class="chip ${r.kind==='municipio'?'v':'a'}">${r.kind}</span></td>
-     <td><b>${esc(r.origBarrio)}</b> ${typeof r.origId==='number'?`<span class="id">#${r.origId}</span>`:''}<br><span class="hint">${esc(r.origMuni)}${r.origLoc?' · '+esc(r.origLoc):''}</span></td>
-     <td class="num">${fam(r.origFam)}</td>
+  if(!registro.length){
+    body.innerHTML='<div class="empty"><b>Todavía no cargaste reemplazos.</b>En “Un barrio” usá <b style="color:var(--accent-deep)">Elegir</b>; en “Un municipio” tocá <b style="color:var(--accent-deep)">Reemplazar</b> y asigná a cada barrio su reemplazo.</div>';
+    return;
+  }
+  const rows=registro.map((r,i)=>{
+    const st=rowStatus(r);
+    const isActive = state.activeReg===r.origId;
+    let repCell, stCell, actBtn;
+    if(r.repId==null){
+      repCell='<span class="hint">— sin reemplazo —</span>';
+      stCell='<span class="st st-pending">pendiente</span>';
+      actBtn=`<button class="btn mini2" data-go="${r.origId}">Elegir reemplazo</button>`;
+    } else {
+      const rep=listById.get(r.repId);
+      repCell=`<b>${esc(rep.b)}</b> <span class="id">#${rep.id}</span> ${badge(statusOf(rep.id))}<br><span class="hint">${esc(rep.dep)} · ${esc(rep.loc)}</span>`;
+      stCell = st==='ok'
+        ? '<span class="st st-ok">✓ correcto</span>'
+        : `<span class="st st-warn">⚠ ${listById.get(r.repId).e!==r.orig.e?'distinto estrato':'distinto tipo'}</span>`;
+      actBtn=`<button class="btn mini2" data-go="${r.origId}">Cambiar</button>`;
+    }
+    const repFam = r.repId!=null ? listById.get(r.repId).f : null;
+    const repTipo = r.repId!=null ? listById.get(r.repId).t : '';
+    return `<tr class="${isActive?'active':''}">
+     <td>${stCell}</td>
+     <td><b>${esc(r.orig.b)}</b> <span class="id">#${r.origId}</span><br><span class="hint">${esc(r.orig.dep)}${r.orig.loc?' · '+esc(r.orig.loc):''} · ${esc(r.orig.t)}</span></td>
+     <td class="num">${fam(r.orig.f)}</td>
      <td class="arrow">→</td>
-     <td><b>${esc(r.repBarrio)}</b> <span class="id">#${r.repId}</span> ${badge(r.repEstado)}<br><span class="hint">${esc(r.repMuni)} · ${esc(r.repLoc)}</span></td>
-     <td class="num">${fam(r.repFam)}</td>
-     <td>${esc(r.repTipo)}</td>
+     <td>${repCell}</td>
+     <td class="num">${fam(repFam)}</td>
+     <td>${esc(repTipo)}</td>
      <td><input class="regnote" data-i="${i}" value="${esc(r.nota)}" placeholder="motivo / nota"></td>
-     <td><button class="rm" data-rm="${i}" title="Quitar">×</button></td>
-   </tr>`).join('');
+     <td style="white-space:nowrap">${actBtn} <button class="rm" data-rm="${i}" title="Quitar del registro">×</button></td>
+   </tr>`;
+  }).join('');
   body.innerHTML=`<div class="tablewrap"><table>
-     <thead><tr><th>Tipo</th><th>Original</th><th class="num">Fam.</th><th></th><th>Reemplazo</th><th class="num">Fam.</th><th>Tipo</th><th>Nota</th><th></th></tr></thead>
+     <thead><tr><th>Estado</th><th>Barrio original</th><th class="num">Fam.</th><th></th><th>Reemplazo</th><th class="num">Fam.</th><th>Tipo</th><th>Nota</th><th></th></tr></thead>
      <tbody>${rows}</tbody></table></div>`;
-  body.querySelectorAll('.rm').forEach(b=>b.onclick=()=>{registro.splice(+b.dataset.rm,1);renderRegistro();renderMain();});
+  body.querySelectorAll('.rm').forEach(b=>b.onclick=()=>{
+    const r=registro[+b.dataset.rm]; if(state.activeReg===r.origId) state.activeReg=null;
+    registro.splice(+b.dataset.rm,1); renderRegistro(); renderMain();
+  });
   body.querySelectorAll('.regnote').forEach(inp=>inp.onchange=()=>{registro[+inp.dataset.i].nota=inp.value;});
+  body.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>setActiveAndGo(+b.dataset.go));
 }
+
 function downloadCSV(){
-  const cols=['tipo_reemplazo','barrio_original','id_original','municipio_original','localidad_original','estrato','tipo_original','familias_original','barrio_reemplazo','id_reemplazo','municipio_reemplazo','localidad_reemplazo','tipo_reemplazo_barrio','familias_reemplazo','estado_reemplazo','delta_familias','nota'];
+  const cols=['estado','tipo_flujo','barrio_original','id_original','municipio_original','localidad_original','estrato','tipo_original','familias_original',
+              'barrio_reemplazo','id_reemplazo','municipio_reemplazo','localidad_reemplazo','tipo_reemplazo','familias_reemplazo','estado_muestra_reemplazo','delta_familias','nota'];
   const lines=[cols.join(';')];
+  const cell=v=>{v=(v==null?'':String(v)); return /[";\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
   registro.forEach(r=>{
-    const delta=(r.origFam!=null&&r.repFam!=null)?(r.repFam-r.origFam):'';
-    const cell=v=>{v=(v==null?'':String(v)); return /[";\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
-    lines.push([r.kind,r.origBarrio,r.origId,r.origMuni,r.origLoc,r.origEstrato,r.origTipo,r.origFam,
-      r.repBarrio,r.repId,r.repMuni,r.repLoc,r.repTipo,r.repFam,r.repEstado,delta,r.nota].map(cell).join(';'));
+    const st=rowStatus(r);
+    const rep = r.repId!=null ? listById.get(r.repId) : null;
+    const delta=(r.orig.f!=null && rep && rep.f!=null)?(rep.f-r.orig.f):'';
+    const estadoTxt = st==='pending'?'pendiente':(st==='ok'?'correcto':'revisar (distinto tipo/estrato)');
+    lines.push([estadoTxt, r.kind, r.orig.b, r.origId, r.orig.dep, r.orig.loc, r.orig.e, r.orig.t, r.orig.f,
+      rep?rep.b:'', rep?rep.id:'', rep?rep.dep:'', rep?rep.loc:'', rep?rep.t:'', rep?rep.f:'', rep?statusOf(rep.id):'', delta, r.nota].map(cell).join(';'));
   });
   const blob=new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
@@ -645,6 +775,13 @@ function setModeButtons(){
 }
 $('#mode-barrio').onclick=()=>{mode='barrio'; setModeButtons(); renderSelectors(); renderMain();};
 $('#mode-muni').onclick=()=>{mode='muni'; setModeButtons(); renderSelectors(); renderMain();};
+
+$('#csvbtn').onclick=downloadCSV;
+$('#clearreg').onclick=()=>{
+  if(!registro.length) return;
+  if(!confirm('¿Vaciar el registro de reemplazos? Esta acción no se puede deshacer.')) return;
+  registro=[]; state.activeReg=null; renderRegistro(); renderMain();
+};
 
 /* ================= INIT ================= */
 rebuildIndex();
