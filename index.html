@@ -115,6 +115,7 @@
   .b-out{background:var(--accent-tint);color:var(--accent-deep)}
   .b-tit{background:#efe6e5;color:var(--danger)}
   .b-used{background:#e7e2ef;color:#5b4a86}
+  .b-fmused{background:#dfe9ef;color:#2b5f86}
   .b-baja{background:#e9ecef;color:#5c6862}
   .delta.near{color:var(--accent-deep);font-weight:600}
   .delta.far{color:var(--muted)}
@@ -256,9 +257,11 @@ function rolStatus(rol){          // normalize the sheet's "rol" column into a s
   if(r==='reserva' || r==='suplente') return 'reserva';
   if(r==='baja titular' || r==='baja') return 'baja';
   if(r==='suplente utilizado' || r==='reserva utilizada' || r==='suplente usado') return 'usado';
+  if(r==='fuera muestra utilizado' || r==='fuera de muestra utilizado' ||
+     r==='fuera muestra utilizada' || r==='fuera de muestra utilizada') return 'fmused';
   return r ? 'otro' : 'reserva';   // unknown non-empty → 'otro' (not a target, not an option)
 }
-function statusOf(id){            // titular | reserva | baja | usado | otro | out
+function statusOf(id){            // titular | reserva | baja | usado | fmused | otro | out
   const m = byId.get(id);
   if(!m) return 'out';
   return rolStatus(m.rol);
@@ -266,11 +269,15 @@ function statusOf(id){            // titular | reserva | baja | usado | otro | o
 // can this barrio be a target the user replaces? (titular in field, or an unused suplente)
 function isTargetStatus(st){ return st==='titular' || st==='reserva'; }
 // can this barrio be OFFERED as a replacement? (available suplente, or outside the sample)
+// NOT: titular / baja (already replaced) / usado (suplente already used) / fmused (fuera de muestra ya operativo)
 function isOptionStatus(st){ return st==='reserva' || st==='out'; }
+// already operative / in field (shown like a titular, not offered as a replacement)
+function isOperativeStatus(st){ return st==='titular' || st==='usado' || st==='fmused'; }
 function badge(st){
   if(st==='reserva') return '<span class="badge b-res">reserva</span>';
   if(st==='titular') return '<span class="badge b-tit">titular · en campo</span>';
-  if(st==='usado')   return '<span class="badge b-used">suplente utilizado</span>';
+  if(st==='usado')   return '<span class="badge b-used">suplente utilizado · operativo</span>';
+  if(st==='fmused')  return '<span class="badge b-fmused">fuera muestra utilizado · operativo</span>';
   if(st==='baja')    return '<span class="badge b-baja">baja titular</span>';
   if(st==='otro')    return '<span class="badge b-baja">otro rol</span>';
   return '<span class="badge b-out">fuera de muestra</span>';
@@ -340,7 +347,7 @@ function renderSelectors(){
       `<label class="fld"><span class="lab">Municipio (partido)</span>
         <select class="control" id="sel-bmuni">${muniOpts}</select></label>
        ${barrioSel}
-       <p class="hint">Se listan los ${munis.length} municipios de la muestra y sus barrios titulares o suplentes. No aparecen los dados de baja ni los suplentes ya utilizados.</p>`;
+       <p class="hint">Se listan los ${munis.length} municipios de la muestra y sus barrios titulares o suplentes. No aparecen los dados de baja, los suplentes ya utilizados ni los fuera de muestra ya operativos.</p>`;
     $('#sel-bmuni').onchange = e=>{state.b_muni=e.target.value; state.b_barrio=''; renderSelectors(); renderMain();};
     const sb=$('#sel-barrio'); if(sb) sb.onchange = e=>{state.b_barrio=e.target.value; renderMain();};
   } else {
@@ -500,13 +507,14 @@ function renderMuni(pane){
   const perMuni = new Map();
   LISTADO.forEach(b=>{
     if(b.dep===dep || !estrSet.has(b.e) || (b.t!=='Villa'&&b.t!=='Asentamiento')) return;
-    if(!perMuni.has(b.dep)) perMuni.set(b.dep,{dep:b.dep, estr:new Set(), availA:0, availV:0, inMuestraT:0, inMuestraR:0});
+    if(!perMuni.has(b.dep)) perMuni.set(b.dep,{dep:b.dep, estr:new Set(), availA:0, availV:0, inMuestraT:0, inMuestraR:0, inMuestraOp:0});
     const o=perMuni.get(b.dep); o.estr.add(b.e);
     const st=statusOf(b.id);
     if(st==='titular') o.inMuestraT++;
     else if(st==='reserva') o.inMuestraR++;
+    else if(st==='usado' || st==='fmused') o.inMuestraOp++;   // suplentes/fuera de muestra ya operativos
     else if(st==='out'){ if(b.t==='Asentamiento')o.availA++; else o.availV++; }
-    // 'usado', 'baja' and 'otro' are neither available nor counted as reserva/titular
+    // 'baja' and 'otro' are neither available nor counted
   });
   let cand=[...perMuni.values()];
   const covers = o => (needAsent? o.availA>0:true) && (needVilla? o.availV>0:true);
@@ -601,7 +609,7 @@ function renderMuni(pane){
        <td>${[...o.estr].map(esc).join(', ')}</td>
        <td class="num">${o.availA}</td>
        <td class="num">${o.availV}</td>
-       <td>${o.inMuestraT?`<span class="chip">${o.inMuestraT} titular</span> `:''}${o.inMuestraR?`<span class="chip">${o.inMuestraR} reserva</span>`:''}${(!o.inMuestraT&&!o.inMuestraR)?'<span class="hint">—</span>':''}</td>
+       <td>${o.inMuestraT?`<span class="chip">${o.inMuestraT} titular</span> `:''}${o.inMuestraOp?`<span class="chip">${o.inMuestraOp} operativo</span> `:''}${o.inMuestraR?`<span class="chip">${o.inMuestraR} reserva</span>`:''}${(!o.inMuestraT&&!o.inMuestraR&&!o.inMuestraOp)?'<span class="hint">—</span>':''}</td>
        <td><button class="expandbtn" data-muni="${esc(o.dep)}">${state.expanded.has(o.dep)?'Ocultar barrios':'Ver barrios ▾'}</button></td>`;
     mr.appendChild(tr);
     if(state.expanded.has(o.dep)){
