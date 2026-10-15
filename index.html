@@ -165,6 +165,28 @@
   .toast.show{opacity:1}
   .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
   a.help{color:var(--accent-deep)}
+
+  /* ---- muestra actual por estrato ---- */
+  .muestra-actual{margin:2px 0 20px;border-left:4px solid var(--accent)}
+  .muestra-actual .hd{display:flex;justify-content:space-between;align-items:center;gap:8px 14px;flex-wrap:wrap;color:var(--accent-deep)}
+  #muestra-sum{font-weight:500;font-size:13px;color:var(--muted)}
+  #muestra-sum b{font-weight:600}
+  .ma-table{font-size:13.5px}
+  .ma-table th{white-space:nowrap}
+  .ma-table td,.ma-table th{padding:8px 12px}
+  .ma-table tfoot td{border-top:2px solid var(--line-strong);font-weight:600;background:#fafbfa}
+  .ma-ok{color:var(--accent-deep);font-weight:600}
+  .ma-falta{color:var(--danger);font-weight:600}
+  .ma-pasa{color:var(--amber);font-weight:600}
+  tr.row-falta td.ma-dif{color:var(--danger);font-weight:600}
+  tr.row-pasa td.ma-dif{color:var(--amber);font-weight:600}
+  tr.row-ok td.ma-dif{color:var(--accent-deep)}
+  .ma-barcol{width:140px}
+  .ma-bar{display:flex;height:12px;border-radius:6px;overflow:hidden;background:#eef1ec;min-width:120px}
+  .ma-bar .seg{height:100%}
+  .ma-bar .seg.ok{background:var(--accent)}
+  .ma-bar .seg.over{background:var(--amber)}
+  .ma-bar .seg.short{background:repeating-linear-gradient(45deg,#eccfca,#eccfca 4px,#f6e3df 4px,#f6e3df 8px)}
 </style>
 </head>
 <body>
@@ -192,6 +214,14 @@
       <button id="mode-barrio" class="on" role="tab">Un barrio</button>
       <button id="mode-muni" role="tab">Un municipio</button>
     </div>
+  </div>
+
+  <div class="panel muestra-actual" id="muestrapanel">
+    <div class="hd">
+      <span>Muestra actual · por estrato</span>
+      <span id="muestra-sum"></span>
+    </div>
+    <div id="muestrabody"></div>
   </div>
 
   <div class="layout">
@@ -250,6 +280,112 @@ function rebuildIndex(){
   MUESTRA.forEach(m=>byId.set(m.id, m));
   LISTADO.forEach(b=>listById.set(b.id, b));
   $('#counts').textContent = MUESTRA.length + ' barrios en muestra · ' + LISTADO.length + ' en el listado provincial';
+  renderMuestraActual();
+}
+
+/* ================= MUESTRA ACTUAL POR ESTRATO ================= */
+// Objetivo del estrato  = cupo de diseño = 56 titulares por estrato (fijo, igual para los 6)
+// En campo (operativos)  = titular + suplente utilizado + fuera muestra utilizado
+// Diferencia             = en campo − objetivo  (0 = ok · <0 faltan · >0 se pasaron)
+// Como el estrato es regla dura, cada reemplazo cae en el mismo estrato que la baja que cubre,
+// así que cada estrato debería llegar a 56 en campo.
+const OBJETIVO_POR_ESTRATO = 56;   // ← cupo de titulares por estrato; cambialo acá si alguna vez varía
+const ESTRATO_ORDER = [
+  "Interior pequeño -50",
+  "Interior Mediano e 50 y 199",
+  "Interior Grande +200",
+  "Primer cordon Conurbano",
+  "Segundo Cordon Conurbano",
+  "Tercer Cordón Conurbano"
+];
+const ESTRATO_SHORT = {
+  "interior pequeno -50":"Int. pequeño −50",
+  "interior mediano e 50 y 199":"Int. mediano 50–199",
+  "interior grande +200":"Int. grande +200",
+  "primer cordon conurbano":"1er cordón",
+  "segundo cordon conurbano":"2do cordón",
+  "tercer cordon conurbano":"3er cordón"
+};
+const normE = s => (s==null?'':String(s)).trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+function estratoShort(e){ return ESTRATO_SHORT[normE(e)] || (e==null?'—':String(e)); }
+function estratoRank(e){ const n=normE(e); const i=ESTRATO_ORDER.findIndex(x=>normE(x)===n); return i<0?99:i; }
+
+function muestraActualRows(){
+  const map = new Map();
+  const seed = e => { if(!map.has(e)) map.set(e,{e, obj:0, campo:0, tit:0, baja:0, usado:0, fmused:0}); return map.get(e); };
+  MUESTRA.forEach(m=>{
+    const st = rolStatus(m.rol);
+    const g = seed(m.e==null ? '—' : String(m.e));
+    if(st==='titular'){ g.campo++; g.tit++; }
+    else if(st==='baja'){ g.baja++; }          // titular ya reemplazado: NO está en campo
+    else if(st==='usado'){ g.campo++; g.usado++; }
+    else if(st==='fmused'){ g.campo++; g.fmused++; }
+    // reserva / otro → no cuentan en «en campo»
+  });
+  // asegurar los 6 estratos aunque alguno no aparezca en la muestra
+  ESTRATO_ORDER.forEach(e=>{ if(![...map.keys()].some(k=>normE(k)===normE(e))) seed(e); });
+  // objetivo fijo por estrato (cupo de diseño)
+  map.forEach(g=>{ g.obj = OBJETIVO_POR_ESTRATO; });
+  const rows = [...map.values()];
+  rows.sort((a,b)=> estratoRank(a.e)-estratoRank(b.e) || String(a.e).localeCompare(String(b.e),'es'));
+  return rows;
+}
+function maVerdict(campo,obj){
+  const d = campo-obj;
+  if(d===0) return '<span class="ma-ok">en 0 ✓</span>';
+  if(d<0)   return '<span class="ma-falta">faltan '+Math.abs(d)+'</span>';
+  return '<span class="ma-pasa">'+d+' de más</span>';
+}
+function maBar(campo,obj){
+  const max = Math.max(obj, campo, 1);
+  const pct = v => (v/max*100).toFixed(2)+'%';
+  const base = Math.min(campo,obj), over = Math.max(0,campo-obj), short = Math.max(0,obj-campo);
+  return '<div class="ma-bar" title="en campo '+campo+' / objetivo '+obj+'">'
+    + (base ?'<span class="seg ok" style="width:'+pct(base)+'"></span>':'')
+    + (over ?'<span class="seg over" style="width:'+pct(over)+'"></span>':'')
+    + (short?'<span class="seg short" style="width:'+pct(short)+'"></span>':'')
+    + '</div>';
+}
+function renderMuestraActual(){
+  const body = $('#muestrabody'); if(!body) return;
+  const rows = muestraActualRows();
+  let tObj=0, tCampo=0; rows.forEach(r=>{ tObj+=r.obj; tCampo+=r.campo; });
+  const tDiff = tCampo - tObj;
+  const signed = d => d>0 ? '+'+d : String(d);
+  const rowCls = d => d===0?'row-ok':(d<0?'row-falta':'row-pasa');
+
+  let h = '<div class="tablewrap"><table class="ma-table"><thead><tr>'
+    + '<th>Estrato</th><th class="num">Objetivo</th><th class="num">En campo</th>'
+    + '<th class="num">Dif.</th><th>Estado</th><th class="ma-barcol"></th>'
+    + '</tr></thead><tbody>';
+  rows.forEach(r=>{
+    const d = r.campo-r.obj;
+    h += '<tr class="'+rowCls(d)+'">'
+      + '<td>'+esc(estratoShort(r.e))+'</td>'
+      + '<td class="num">'+r.obj+'</td>'
+      + '<td class="num">'+r.campo+'</td>'
+      + '<td class="num ma-dif">'+signed(d)+'</td>'
+      + '<td>'+maVerdict(r.campo,r.obj)+'</td>'
+      + '<td class="ma-barcol">'+maBar(r.campo,r.obj)+'</td>'
+      + '</tr>';
+  });
+  h += '</tbody><tfoot><tr class="'+rowCls(tDiff)+'">'
+    + '<td>Total</td>'
+    + '<td class="num">'+tObj+'</td>'
+    + '<td class="num">'+tCampo+'</td>'
+    + '<td class="num ma-dif">'+signed(tDiff)+'</td>'
+    + '<td>'+maVerdict(tCampo,tObj)+'</td>'
+    + '<td class="ma-barcol"></td>'
+    + '</tr></tfoot></table></div>';
+  body.innerHTML = h;
+
+  const sum = $('#muestra-sum');
+  if(sum){
+    const verdict = tDiff===0 ? '<b class="ma-ok">completa ✓</b>'
+      : tDiff<0 ? '<b class="ma-falta">faltan '+Math.abs(tDiff)+'</b>'
+      : '<b class="ma-pasa">'+tDiff+' de más</b>';
+    sum.innerHTML = tCampo+' en campo · objetivo '+OBJETIVO_POR_ESTRATO+' por estrato ('+tObj+' total) · '+verdict;
+  }
 }
 function rolStatus(rol){          // normalize the sheet's "rol" column into a status
   const r = (rol==null?'':String(rol)).trim().toLowerCase();
